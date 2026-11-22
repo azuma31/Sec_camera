@@ -118,6 +118,9 @@ function setPill(id, text, cls){ const el = $(id); el.textContent = text; el.cla
 
 let CAM = '';
 let PW = localStorage.getItem('camPw') || '';
+// QRコード（…#pw=xxxx）から開いたらパスワードを保存して、URLからは消す
+const hashPw = new URLSearchParams(location.hash.slice(1)).get('pw');
+if (hashPw){ PW = hashPw; localStorage.setItem('camPw', PW); history.replaceState(null, '', location.pathname + location.search); }
 // カメラIDはパスワードから自動計算（PC側と同じ計算）
 const camIdFrom = async pw => 'gcam-' + (await sha256hex('gcam-id:' + pw)).slice(0, 16);
 
