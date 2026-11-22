@@ -88,6 +88,12 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
   </section>
 
   <section class="card full">
+    <details><summary class="sub">接続ログ（うまくつながらないとき用）</summary>
+      <pre id="dbg" style="font-size:12px;white-space:pre-wrap;color:var(--sub);max-height:40vh;overflow:auto;margin:8px 0 0"></pre>
+    </details>
+  </section>
+
+  <section class="card full">
     <div class="row"><h2>過去1時間の動き</h2><span class="sub">赤いところをタップで画像を表示</span></div>
     <canvas id="tl"></canvas>
     <div class="axis"><span>60分前</span><span>45分前</span><span>30分前</span><span>15分前</span><span>いま</span></div>
@@ -110,7 +116,16 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
 // 接続の取り次ぎだけに使う（映像はここを通らない）
 const SIG = 'wss://0.peerjs.com/peerjs?key=peerjs&version=1.5.4';
 
+const VER = 'v4';
 const $ = id => document.getElementById(id);
+const dbgLines = [];
+function dlog(msg){
+  dbgLines.push(new Date().toLocaleTimeString('ja-JP', {hour12:false}) + ' ' + msg);
+  if (dbgLines.length > 80) dbgLines.shift();
+  const el = $('dbg'); if (el) el.textContent = dbgLines.join('\n');
+}
+addEventListener('error', e => dlog('エラー: ' + e.message));
+addEventListener('unhandledrejection', e => dlog('エラー: ' + (e.reason && e.reason.message || e.reason)));
 const rid = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join('');
 const tstr = s => new Date(s * 1000).toLocaleTimeString('ja-JP', {hour12:false});
 async function sha256hex(s){
@@ -145,7 +160,14 @@ $('logout').onclick = () => { localStorage.removeItem('camPw'); PW = ''; showLog
 
 async function start(){
   CAM = await camIdFrom(PW);
+  dlog(`ページ ${VER} / カメラID: ${CAM}`);
   $('login').classList.add('hidden'); $('app').classList.remove('hidden');
+  if (typeof RTCPeerConnection === 'undefined'){
+    setPill('conn', 'このブラウザはWebRTCが使えません', 'bad');
+    liveMsg('WebRTCが使えません。\n設定 → プライバシーとセキュリティ → ロックダウンモード がオンだと使えません');
+    dlog('RTCPeerConnection がありません');
+    return;
+  }
   connectSignal();
 }
 
@@ -168,6 +190,7 @@ function closePc(){
 function liveMsg(t){ $('liveErr').textContent = t; $('liveErr').classList.toggle('hidden', !t); }
 
 function fail(msg){
+  dlog('失敗: ' + msg);
   setPill('conn', msg, 'bad'); liveMsg(msg + '\n5秒後に再接続します');
   closePc(); scheduleRetry();
 }
@@ -182,15 +205,18 @@ function connectSignal(){
   clearInterval(hbTimer);
   if (ws){ ws.onclose = null; ws.close(); }
   setPill('conn', '接続中…'); liveMsg('接続中…');
+  dlog('取り次ぎサーバーに接続開始');
   ws = new WebSocket(`${SIG}&id=v${rid(8)}&token=${rid(8)}`);
+  ws.onopen = () => dlog('取り次ぎサーバー: WebSocket接続OK');
   ws.onmessage = e => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
+    dlog('受信: ' + m.type + (m.payload && m.payload.msg ? ' ' + m.payload.msg : '') + (m.payload && m.payload.error ? ' error=' + m.payload.error : ''));
     if (m.type === 'OPEN') call();
     else if (m.type === 'ANSWER') onAnswer(m.payload || {});
     else if (m.type === 'EXPIRE') fail('カメラ(PC)がオフラインです');
     else if (m.type === 'ERROR' || m.type === 'ID-TAKEN' || m.type === 'INVALID-KEY') fail('取り次ぎサーバーのエラー');
   };
-  ws.onclose = () => { clearInterval(hbTimer); if (!pc || pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') scheduleRetry(); };
+  ws.onclose = e => { dlog(`取り次ぎサーバー切断 code=${e.code} ${e.reason || ''}`); clearInterval(hbTimer); if (!pc || pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') scheduleRetry(); };
   ws.onerror = () => {};
   hbTimer = setInterval(() => ws && ws.readyState === 1 && ws.send('{"type":"HEARTBEAT"}'), 5000);
 }
@@ -213,6 +239,7 @@ async function call(){
   pc.oniceconnectionstatechange = () => {
     if (pc !== my) return;
     const s = my.iceConnectionState;
+    dlog('ICE状態: ' + s);
     clearTimeout(discTimer);
     if (s === 'connected' || s === 'completed'){ setPill('conn', 'LAN内で直接接続中', 'ok'); liveMsg(''); }
     else if (s === 'failed') fail('同じネットワーク内でつながりません');
@@ -224,9 +251,13 @@ async function call(){
     if (pc !== my) return;
     const sdp = my.localDescription.sdp;
     cid = rid(6);
-    ws.send(JSON.stringify({type: 'OFFER', dst: CAM, payload: {sdp, cid, auth: await sha256hex(PW + '\n' + sdp)}}));
+    const nc = (sdp.match(/a=candidate:/g) || []).length;
+    const auth = await sha256hex(PW + '\n' + sdp);
+    if (!ws || ws.readyState !== 1){ dlog('送信できません（WebSocketが閉じています）'); scheduleRetry(); return; }
+    ws.send(JSON.stringify({type: 'OFFER', dst: CAM, payload: {sdp, cid, auth}}));
+    dlog(`接続要求を送信 → ${CAM}（iPad候補 ${nc}個）`);
     answerTimer = setTimeout(() => fail('カメラから応答がありません'), 15000);
-  } catch (e) { fail('接続の準備に失敗しました'); }
+  } catch (e) { dlog('準備エラー: ' + e.message); fail('接続の準備に失敗しました'); }
 }
 
 async function onAnswer(p){
