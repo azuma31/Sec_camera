@@ -116,7 +116,7 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
 // 接続の取り次ぎだけに使う（映像はここを通らない）
 const SIG = 'wss://0.peerjs.com/peerjs?key=peerjs&version=1.5.4';
 
-const VER = 'v4';
+const VER = 'v5';
 const $ = id => document.getElementById(id);
 const dbgLines = [];
 function dlog(msg){
@@ -221,6 +221,15 @@ function connectSignal(){
   hbTimer = setInterval(() => ws && ws.readyState === 1 && ws.send('{"type":"HEARTBEAT"}'), 5000);
 }
 
+// LAN内のアドレスか（プライベートIPv4 / mDNS名 / IPv6 ULA・リンクローカル）
+function isLan(a){
+  a = a.toLowerCase();
+  if (a.endsWith('.local')) return true;
+  if (a.includes(':')) return /^f[cd]/.test(a) || a.startsWith('fe80');
+  const p = a.split('.').map(Number);
+  return p[0] === 10 || (p[0] === 172 && p[1] >= 16 && p[1] <= 31) || (p[0] === 192 && p[1] === 168) || (p[0] === 169 && p[1] === 254);
+}
+
 function gathered(p){
   return new Promise(r => {
     if (p.iceGatheringState === 'complete') return r();
@@ -245,23 +254,32 @@ async function call(){
     else if (s === 'failed') fail('同じネットワーク内でつながりません');
     else if (s === 'disconnected'){ setPill('conn', '通信が不安定…', 'bad'); discTimer = setTimeout(() => pc === my && fail('接続が切れました'), 8000); }
   };
+  const cands = [];
+  pc.onicecandidate = e => { if (e.candidate && e.candidate.candidate) cands.push(e.candidate); };
   try {
     await my.setLocalDescription(await my.createOffer());
     await gathered(my);
     if (pc !== my) return;
-    const sdp = my.localDescription.sdp;
-    cid = rid(6);
-    const nc = (sdp.match(/a=candidate:/g) || []).length;
+    // 候補はSDPから外して、PeerJSと同じく1つずつ CANDIDATE で送る（LAN内のhost候補だけ）
+    const sdp = my.localDescription.sdp.split(/\r?\n/)
+      .filter(l => l && !l.startsWith('a=candidate:') && l !== 'a=end-of-candidates').join('\r\n') + '\r\n';
+    const lan = cands.filter(c => { const p = c.candidate.split(' '); return p[7] === 'host' && isLan(p[4] || ''); });
+    cid = 'mc_' + rid(6);
     const auth = await sha256hex(PW + '\n' + sdp);
     if (!ws || ws.readyState !== 1){ dlog('送信できません（WebSocketが閉じています）'); scheduleRetry(); return; }
-    ws.send(JSON.stringify({type: 'OFFER', dst: CAM, payload: {sdp, cid, auth}}));
-    dlog(`接続要求を送信 → ${CAM}（iPad候補 ${nc}個）`);
+    // 本物のPeerJSと同じ形のメッセージにする
+    ws.send(JSON.stringify({type: 'OFFER', dst: CAM, payload: {
+      sdp: {type: 'offer', sdp}, type: 'media', connectionId: cid, browser: 'safari', metadata: {auth}}}));
+    for (const c of lan) ws.send(JSON.stringify({type: 'CANDIDATE', dst: CAM, payload: {
+      candidate: {candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex}, type: 'media', connectionId: cid}}));
+    dlog(`接続要求を送信 → ${CAM}（${sdp.length}文字・LAN候補 ${lan.length}/${cands.length}個）`);
     answerTimer = setTimeout(() => fail('カメラから応答がありません'), 15000);
   } catch (e) { dlog('準備エラー: ' + e.message); fail('接続の準備に失敗しました'); }
 }
 
 async function onAnswer(p){
-  if (p.cid !== cid || !pc) return;
+  if (p.connectionId !== cid || !pc) return;
+  if (p.sdp && typeof p.sdp === 'object') p.sdp = p.sdp.sdp;
   clearTimeout(answerTimer);
   if (p.error === 'auth'){ localStorage.removeItem('camPw'); PW = ''; showLogin('パスワードが違います'); return; }
   if (p.error === 'busy'){ fail('同時に見られる台数の上限です'); return; }
