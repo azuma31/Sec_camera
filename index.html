@@ -14,6 +14,7 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,"
 .hidden{display:none!important}
 button{font:inherit;color:var(--text);background:#232935;border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer}
 button:active{opacity:.7}
+button.danger{color:var(--red);border-color:#5a2a2c}
 .login{min-height:100vh;display:grid;place-items:center}
 .login form{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px;width:min(360px,90vw);text-align:center}
 .login h1{margin:0 0 6px;font-size:20px}
@@ -58,7 +59,7 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
   <form id="loginForm">
     <h1>監視カメラ</h1>
     <p class="sub">PCと同じWi-Fiにつないでください</p>
-    <input id="pw" type="password" inputmode="numeric" autocomplete="current-password" placeholder="パスワード">
+    <input id="pw" type="password" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="current-password" placeholder="パスワード（16文字）">
     <button>接続</button>
     <p id="loginErr" class="err"></p>
   </form>
@@ -70,6 +71,8 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
     <span id="conn" class="pill">接続中…</span>
     <span id="camState" class="pill hidden"></span>
     <span id="motionState" class="pill hidden"></span>
+    <button id="nightBtn" class="hidden">暗所補正: 自動</button>
+    <button id="shutdownBtn" class="danger hidden">PCをシャットダウン</button>
     <button id="logout">ログアウト</button>
   </header>
 
@@ -232,8 +235,15 @@ async function onAnswer(p){
   if (p.error === 'auth'){ localStorage.removeItem('camPw'); PW = ''; showLogin('パスワードが違います'); return; }
   if (p.error === 'busy'){ fail('同時に見られる台数の上限です'); return; }
   if (p.error){ fail(p.error); return; }
+  if (!/a=candidate:/.test(p.sdp || '')){ fail('PCのLANアドレスが見つかりません'); return; }
   try { await pc.setRemoteDescription({type: 'answer', sdp: p.sdp}); }
-  catch (e) { fail('接続エラー'); }
+  catch (e) { fail('接続エラー'); return; }
+  setPill('conn', 'PCと直接接続を試しています…'); liveMsg('PCと直接接続を試しています…');
+  const my = pc;
+  answerTimer = setTimeout(() => {
+    if (pc === my && !['connected', 'completed'].includes(my.iceConnectionState))
+      fail('PCと直接つながりません（ファイアウォールか、別のネットワーク）');
+  }, 20000);
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -256,6 +266,10 @@ function setupDc(ch){
       try { m = JSON.parse(a.join('')); } catch { return; }
     }
     if (m.t === 'status'){ data = m; render(); }
+    else if (m.t === 'shutdownResult'){
+      if (m.ok){ stopAll(); setPill('conn', 'PCをシャットダウンしました', 'bad'); liveMsg('PCをシャットダウンしました'); }
+      else alert('PC側でシャットダウンが禁止されています');
+    }
     else if (m.t === 'shot' && pending[m.req]){ const f = pending[m.req]; delete pending[m.req]; f(m.b64); }
   };
 }
@@ -279,9 +293,22 @@ function getShot(id, n){
   return p;
 }
 
+// ---------- 暗所補正・シャットダウン ----------
+const NIGHT = {auto: '自動', on: '強', off: '切'}, NEXT = {auto: 'on', on: 'off', off: 'auto'};
+$('nightBtn').onclick = () => {
+  if (!data || !dc || dc.readyState !== 'open') return;
+  dc.send(JSON.stringify({t: 'night', mode: NEXT[data.night] || 'auto'}));
+};
+$('shutdownBtn').onclick = () => {
+  if (!dc || dc.readyState !== 'open') return;
+  if (!confirm('PCをシャットダウンします。監視も止まります。よろしいですか？')) return;
+  dc.send(JSON.stringify({t: 'shutdown'}));
+};
+
 // ---------- 表示 ----------
 function render(){
-  $('camState').classList.remove('hidden'); $('motionState').classList.remove('hidden');
+  for (const id of ['camState', 'motionState', 'nightBtn', 'shutdownBtn']) $(id).classList.remove('hidden');
+  $('nightBtn').textContent = `暗所補正: ${NIGHT[data.night] || '自動'}`;
   setPill('camState', data.camera ? 'カメラ OK' : 'カメラが見つかりません', data.camera ? 'ok' : 'bad');
   const active = data.events.find(e => e.active);
   if (data.armedIn > 0) setPill('motionState', `監視開始まで ${data.armedIn}秒`);
