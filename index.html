@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>監視カメラ</title>
+<style>
+:root{--bg:#0d1015;--panel:#161a21;--line:#262c36;--text:#e7eaf0;--sub:#8a93a2;--red:#ff4d4f;--green:#34c759;--accent:#3ea6ff}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,"Hiragino Sans",sans-serif;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.hidden{display:none!important}
+button{font:inherit;color:var(--text);background:#232935;border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer}
+button:active{opacity:.7}
+.login{min-height:100vh;display:grid;place-items:center}
+.login form{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:28px;width:min(360px,90vw);text-align:center}
+.login h1{margin:0 0 6px;font-size:20px}
+.login p.sub{margin:0 0 18px}
+.login input{width:100%;font-size:18px;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0d1015;color:var(--text);text-align:center;margin-bottom:10px}
+.login button{width:100%;padding:12px;background:var(--accent);border:none;color:#fff;font-weight:600}
+.err{color:var(--red);min-height:1.2em;font-size:14px;margin:10px 0 0}
+main{max-width:1100px;margin:0 auto;padding:14px;display:grid;gap:14px;grid-template-columns:1fr}
+@media(min-width:900px){main{grid-template-columns:1.6fr 1fr}.full{grid-column:1/-1}}
+header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+header h1{font-size:18px;margin:0 auto 0 0}
+.pill{font-size:13px;padding:5px 10px;border-radius:999px;background:#232935;color:var(--sub)}
+.pill.ok{color:var(--green)}.pill.bad{color:var(--red)}
+.pill.alert{background:var(--red);color:#fff;animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.55}}
+.live{position:relative;background:#000;border-radius:14px;overflow:hidden;aspect-ratio:16/9}
+.live video{width:100%;height:100%;object-fit:contain;display:block}
+.overlay{position:absolute;inset:0;display:grid;place-items:center;color:var(--sub);background:#000c;text-align:center;padding:20px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.card h2{font-size:15px;margin:0}
+.row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.sub{color:var(--sub);font-size:13px}
+canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015;cursor:pointer}
+.axis{display:flex;justify-content:space-between;color:var(--sub);font-size:11px;margin-top:4px}
+.list{display:grid;gap:8px;max-height:60vh;overflow:auto;margin-top:10px}
+.ev{display:flex;gap:10px;align-items:center;background:#0d1015;border:1px solid var(--line);border-radius:10px;padding:6px;cursor:pointer}
+.ev img{width:112px;aspect-ratio:16/9;object-fit:cover;border-radius:6px;background:#222}
+.ev b{font-size:16px}.ev .sub{margin-top:3px}
+.tag{font-size:11px;background:var(--red);color:#fff;border-radius:6px;padding:1px 6px;margin-left:6px}
+.empty{color:var(--sub);font-size:14px;text-align:center;padding:20px 0}
+.viewer{position:fixed;inset:0;background:#000e;display:flex;flex-direction:column;z-index:10;
+  padding:calc(env(safe-area-inset-top) + 10px) 12px calc(env(safe-area-inset-bottom) + 12px)}
+.vhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.viewer img{flex:1;min-height:0;width:100%;object-fit:contain}
+.vctl{display:flex;gap:8px;align-items:center;margin-top:10px}
+.vctl input{flex:1}
+</style>
+</head>
+<body>
+
+<div id="login" class="login hidden">
+  <form id="loginForm">
+    <h1>監視カメラ</h1>
+    <p class="sub">PCと同じWi-Fiにつないでください</p>
+    <input id="pw" type="password" inputmode="numeric" autocomplete="current-password" placeholder="パスワード">
+    <button>接続</button>
+    <p id="loginErr" class="err"></p>
+  </form>
+</div>
+
+<main id="app" class="hidden">
+  <header class="full">
+    <h1>監視カメラ</h1>
+    <span id="conn" class="pill">接続中…</span>
+    <span id="camState" class="pill hidden"></span>
+    <span id="motionState" class="pill hidden"></span>
+    <button id="logout">ログアウト</button>
+  </header>
+
+  <section class="live">
+    <video id="live" autoplay playsinline muted></video>
+    <div id="liveErr" class="overlay">接続中…</div>
+  </section>
+
+  <section class="card">
+    <div class="row"><h2>検知イベント</h2><span id="count" class="sub"></span></div>
+    <div id="list" class="list"></div>
+    <div id="empty" class="empty">過去1時間に動きはありません</div>
+  </section>
+
+  <section class="card full">
+    <div class="row"><h2>過去1時間の動き</h2><span class="sub">赤いところをタップで画像を表示</span></div>
+    <canvas id="tl"></canvas>
+    <div class="axis"><span>60分前</span><span>45分前</span><span>30分前</span><span>15分前</span><span>いま</span></div>
+  </section>
+</main>
+
+<div id="viewer" class="viewer hidden">
+  <div class="vhead"><span id="vtitle"></span><button id="vclose">閉じる</button></div>
+  <img id="vimg" alt="">
+  <div class="vctl">
+    <button id="vprev">◀</button>
+    <input id="vrange" type="range" min="0" value="0">
+    <button id="vnext">▶</button>
+    <button id="vplay">再生</button>
+  </div>
+  <div id="vtime" class="sub" style="text-align:center;margin-top:6px"></div>
+</div>
+
+<script>
+// 接続の取り次ぎだけに使う（映像はここを通らない）
+const SIG = 'wss://0.peerjs.com/peerjs?key=peerjs&version=1.5.4';
+
+const $ = id => document.getElementById(id);
+const rid = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join('');
+const tstr = s => new Date(s * 1000).toLocaleTimeString('ja-JP', {hour12:false});
+async function sha256hex(s){
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(b), x => x.toString(16).padStart(2, '0')).join('');
+}
+function setPill(id, text, cls){ const el = $(id); el.textContent = text; el.className = 'pill ' + (cls || ''); }
+
+let CAM = '';
+let PW = localStorage.getItem('camPw') || '';
+// カメラIDはパスワードから自動計算（PC側と同じ計算）
+const camIdFrom = async pw => 'gcam-' + (await sha256hex('gcam-id:' + pw)).slice(0, 16);
+
+// ---------- ログイン ----------
+function showLogin(msg){
+  stopAll();
+  $('app').classList.add('hidden'); $('login').classList.remove('hidden');
+  $('pw').value = '';
+  $('loginErr').textContent = msg || '';
+}
+$('loginForm').onsubmit = e => {
+  e.preventDefault();
+  PW = $('pw').value.trim();
+  if (!PW){ $('loginErr').textContent = 'パスワードを入れてください'; return; }
+  localStorage.setItem('camPw', PW);
+  start();
+};
+$('logout').onclick = () => { localStorage.removeItem('camPw'); PW = ''; showLogin(); };
+
+async function start(){
+  CAM = await camIdFrom(PW);
+  $('login').classList.add('hidden'); $('app').classList.remove('hidden');
+  connectSignal();
+}
+
+// ---------- 接続（取り次ぎ → P2P） ----------
+let ws = null, pc = null, dc = null, cid = null, hbTimer = null, answerTimer = null, retryTimer = null, discTimer = null;
+let running = false;
+
+function stopAll(){
+  running = false;
+  clearTimeout(retryTimer); clearTimeout(answerTimer); clearInterval(hbTimer);
+  closePc();
+  if (ws){ ws.onclose = null; ws.close(); ws = null; }
+}
+function closePc(){
+  clearTimeout(discTimer);
+  if (dc){ dc.onmessage = null; dc = null; }
+  if (pc){ pc.oniceconnectionstatechange = null; pc.close(); pc = null; }
+  $('live').srcObject = null;
+}
+function liveMsg(t){ $('liveErr').textContent = t; $('liveErr').classList.toggle('hidden', !t); }
+
+function fail(msg){
+  setPill('conn', msg, 'bad'); liveMsg(msg + '\n5秒後に再接続します');
+  closePc(); scheduleRetry();
+}
+function scheduleRetry(ms = 5000){
+  if (!running) return;
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => { if (ws && ws.readyState === 1) call(); else connectSignal(); }, ms);
+}
+
+function connectSignal(){
+  running = true;
+  clearInterval(hbTimer);
+  if (ws){ ws.onclose = null; ws.close(); }
+  setPill('conn', '接続中…'); liveMsg('接続中…');
+  ws = new WebSocket(`${SIG}&id=v${rid(8)}&token=${rid(8)}`);
+  ws.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'OPEN') call();
+    else if (m.type === 'ANSWER') onAnswer(m.payload || {});
+    else if (m.type === 'EXPIRE') fail('カメラ(PC)がオフラインです');
+    else if (m.type === 'ERROR' || m.type === 'ID-TAKEN' || m.type === 'INVALID-KEY') fail('取り次ぎサーバーのエラー');
+  };
+  ws.onclose = () => { clearInterval(hbTimer); if (!pc || pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') scheduleRetry(); };
+  ws.onerror = () => {};
+  hbTimer = setInterval(() => ws && ws.readyState === 1 && ws.send('{"type":"HEARTBEAT"}'), 5000);
+}
+
+function gathered(p){
+  return new Promise(r => {
+    if (p.iceGatheringState === 'complete') return r();
+    const t = setTimeout(r, 3000);
+    p.addEventListener('icegatheringstatechange', () => { if (p.iceGatheringState === 'complete'){ clearTimeout(t); r(); } });
+  });
+}
+
+async function call(){
+  closePc(); clearTimeout(retryTimer); clearTimeout(answerTimer);
+  setPill('conn', 'カメラに接続中…'); liveMsg('カメラに接続中…');
+  const my = pc = new RTCPeerConnection({iceServers: []}); // STUN/TURNなし = LAN内でしかつながらない
+  pc.addTransceiver('video', {direction: 'recvonly'});
+  dc = pc.createDataChannel('ctl'); setupDc(dc);
+  pc.ontrack = e => { $('live').srcObject = e.streams[0] || new MediaStream([e.track]); $('live').play().catch(() => {}); };
+  pc.oniceconnectionstatechange = () => {
+    if (pc !== my) return;
+    const s = my.iceConnectionState;
+    clearTimeout(discTimer);
+    if (s === 'connected' || s === 'completed'){ setPill('conn', 'LAN内で直接接続中', 'ok'); liveMsg(''); }
+    else if (s === 'failed') fail('同じネットワーク内でつながりません');
+    else if (s === 'disconnected'){ setPill('conn', '通信が不安定…', 'bad'); discTimer = setTimeout(() => pc === my && fail('接続が切れました'), 8000); }
+  };
+  try {
+    await my.setLocalDescription(await my.createOffer());
+    await gathered(my);
+    if (pc !== my) return;
+    const sdp = my.localDescription.sdp;
+    cid = rid(6);
+    ws.send(JSON.stringify({type: 'OFFER', dst: CAM, payload: {sdp, cid, auth: await sha256hex(PW + '\n' + sdp)}}));
+    answerTimer = setTimeout(() => fail('カメラから応答がありません'), 15000);
+  } catch (e) { fail('接続の準備に失敗しました'); }
+}
+
+async function onAnswer(p){
+  if (p.cid !== cid || !pc) return;
+  clearTimeout(answerTimer);
+  if (p.error === 'auth'){ localStorage.removeItem('camPw'); PW = ''; showLogin('パスワードが違います'); return; }
+  if (p.error === 'busy'){ fail('同時に見られる台数の上限です'); return; }
+  if (p.error){ fail(p.error); return; }
+  try { await pc.setRemoteDescription({type: 'answer', sdp: p.sdp}); }
+  catch (e) { fail('接続エラー'); }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !running) return;
+  if (!pc || !['connected', 'completed'].includes(pc.iceConnectionState)) scheduleRetry(100);
+});
+
+// ---------- データチャネル（状態・画像） ----------
+let data = null, reqN = 0, topId = null;
+const parts = {}, pending = {}, shotCache = new Map();
+
+function setupDc(ch){
+  ch.onmessage = e => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.t === 'part'){
+      const a = parts[m.m] || (parts[m.m] = []);
+      a[m.i] = m.d;
+      if (a.filter(x => x !== undefined).length < m.n) return;
+      delete parts[m.m];
+      try { m = JSON.parse(a.join('')); } catch { return; }
+    }
+    if (m.t === 'status'){ data = m; render(); }
+    else if (m.t === 'shot' && pending[m.req]){ const f = pending[m.req]; delete pending[m.req]; f(m.b64); }
+  };
+}
+
+function getShot(id, n){
+  const k = id + '/' + n;
+  if (shotCache.has(k)) return shotCache.get(k);
+  if (!dc || dc.readyState !== 'open') return Promise.resolve(null);
+  const req = ++reqN;
+  const p = new Promise(res => {
+    pending[req] = b64 => {
+      if (!b64){ shotCache.delete(k); return res(null); }
+      const bin = atob(b64), u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      res(URL.createObjectURL(new Blob([u], {type: 'image/jpeg'})));
+    };
+    setTimeout(() => { if (pending[req]){ delete pending[req]; shotCache.delete(k); res(null); } }, 15000);
+  });
+  shotCache.set(k, p);
+  dc.send(JSON.stringify({t: 'shot', id, n, req}));
+  return p;
+}
+
+// ---------- 表示 ----------
+function render(){
+  $('camState').classList.remove('hidden'); $('motionState').classList.remove('hidden');
+  setPill('camState', data.camera ? 'カメラ OK' : 'カメラが見つかりません', data.camera ? 'ok' : 'bad');
+  const active = data.events.find(e => e.active);
+  if (data.armedIn > 0) setPill('motionState', `監視開始まで ${data.armedIn}秒`);
+  else setPill('motionState', active ? '● 動きを検知中' : '監視中', active ? 'alert' : 'ok');
+  const newest = data.events[0]?.id ?? null;
+  if (topId !== null && newest !== null && newest !== topId) document.title = '● 動き検知 - 監視カメラ';
+  topId = newest;
+  $('count').textContent = data.events.length + '件';
+  // 1時間より古い画像のキャッシュを捨てる
+  const ids = new Set(data.events.map(e => String(e.id)));
+  for (const [k, p] of shotCache) if (!ids.has(k.split('/')[0])){ shotCache.delete(k); p.then(u => u && URL.revokeObjectURL(u)); }
+  drawTimeline(); renderList(); refreshViewer();
+}
+addEventListener('focus', () => document.title = '監視カメラ');
+document.addEventListener('touchstart', () => document.title = '監視カメラ', {passive: true});
+
+function drawTimeline(){
+  if (!data) return;
+  const c = $('tl'), dpr = devicePixelRatio || 1;
+  const W = c.clientWidth * dpr, H = c.clientHeight * dpr;
+  c.width = W; c.height = H;
+  const g = c.getContext('2d'), b = data.buckets, n = b.length, bw = W / n;
+  const max = Math.max(0.01, ...b.filter(v => v));
+  g.fillStyle = '#1f2530'; g.fillRect(0, H - 2*dpr, W, 2*dpr);
+  for (let i = 0; i < n; i++){
+    const v = b[i];
+    if (v === null || v === undefined){ g.fillStyle = '#151a22'; g.fillRect(i*bw, 0, Math.ceil(bw), H); continue; }
+    if (v > 0){
+      const h = Math.max(4*dpr, Math.sqrt(v / max) * (H - 4*dpr));
+      g.fillStyle = '#ff4d4f'; g.fillRect(i*bw, H - h, Math.max(1, Math.ceil(bw)), h);
+    }
+  }
+  g.strokeStyle = '#2b3240'; g.lineWidth = dpr;
+  for (let k = 1; k < 4; k++){ const x = W * k / 4; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
+}
+$('tl').onclick = e => {
+  if (!data || !data.events.length) return;
+  const r = $('tl').getBoundingClientRect();
+  const t = data.bucketStart + (e.clientX - r.left) / r.width * data.buckets.length * data.bucket;
+  let best = null, bd = Infinity;
+  for (const ev of data.events){
+    const d = t < ev.start ? ev.start - t : t > ev.end ? t - ev.end : 0;
+    if (d < bd){ bd = d; best = ev; }
+  }
+  if (best && bd < 120) openViewer(best.id);
+};
+
+let listSig = '';
+function renderList(){
+  const sig = data.events.map(e => e.id + ':' + e.shots.length + ':' + e.active).join(',') + '|' + Math.floor(data.now / 60);
+  if (sig === listSig) return;
+  listSig = sig;
+  $('empty').classList.toggle('hidden', data.events.length > 0);
+  $('list').innerHTML = data.events.map(e => `
+    <div class="ev" data-id="${e.id}">
+      <img alt="" data-id="${e.id}">
+      <div>
+        <b>${tstr(e.start)}</b>${e.active ? '<span class="tag">検知中</span>' : ''}
+        <div class="sub">長さ ${Math.max(1, Math.round(e.end - e.start))}秒・画像 ${e.shots.length}枚</div>
+        <div class="sub">${Math.round((data.now - e.end) / 60)}分前</div>
+      </div>
+    </div>`).join('');
+  $('list').querySelectorAll('img[data-id]').forEach(img => getShot(+img.dataset.id, 0).then(u => { if (u) img.src = u; }));
+}
+$('list').onclick = e => { const el = e.target.closest('.ev'); if (el) openViewer(+el.dataset.id); };
+
+// ---------- 画像ビューア ----------
+let vEv = null, vIdx = 0, vTimer = null, vTok = 0;
+function openViewer(id){
+  vEv = data.events.find(e => e.id === id); if (!vEv) return;
+  vIdx = 0; $('viewer').classList.remove('hidden'); showShot();
+}
+function refreshViewer(){
+  if (!vEv) return;
+  const e = data.events.find(x => x.id === vEv.id);
+  if (e){ vEv = e; $('vrange').max = e.shots.length - 1; }
+}
+async function showShot(){
+  const n = vEv.shots.length;
+  vIdx = Math.max(0, Math.min(n - 1, vIdx));
+  $('vrange').max = n - 1; $('vrange').value = vIdx;
+  $('vtitle').textContent = `${tstr(vEv.start)} の検知（${vIdx + 1} / ${n}）`;
+  $('vtime').textContent = tstr(vEv.shots[vIdx]);
+  const tok = ++vTok, u = await getShot(vEv.id, vIdx);
+  if (tok === vTok && u) $('vimg').src = u;
+}
+function stopPlay(){ clearInterval(vTimer); vTimer = null; $('vplay').textContent = '再生'; }
+$('vprev').onclick = () => { stopPlay(); vIdx--; showShot(); };
+$('vnext').onclick = () => { stopPlay(); vIdx++; showShot(); };
+$('vrange').oninput = e => { stopPlay(); vIdx = +e.target.value; showShot(); };
+$('vplay').onclick = () => {
+  if (vTimer) return stopPlay();
+  if (vIdx >= vEv.shots.length - 1) vIdx = 0;
+  $('vplay').textContent = '停止';
+  vTimer = setInterval(() => { if (vIdx >= vEv.shots.length - 1) return stopPlay(); vIdx++; showShot(); }, 700);
+  showShot();
+};
+$('vclose').onclick = () => { stopPlay(); vEv = null; $('viewer').classList.add('hidden'); };
+addEventListener('resize', drawTimeline);
+
+// ---------- 起動 ----------
+if (PW) start(); else showLogin();
+</script>
+</body>
+</html>
