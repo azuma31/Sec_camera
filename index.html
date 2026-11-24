@@ -72,6 +72,7 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
     <span id="camState" class="pill hidden"></span>
     <span id="motionState" class="pill hidden"></span>
     <button id="nightBtn" class="hidden">暗所補正: 自動</button>
+    <button id="quitBtn" class="hidden">監視を終了</button>
     <button id="shutdownBtn" class="danger hidden">PCをシャットダウン</button>
     <button id="logout">ログアウト</button>
   </header>
@@ -116,7 +117,7 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
 // 接続の取り次ぎだけに使う（映像はここを通らない）
 const SIG = 'wss://0.peerjs.com/peerjs?key=peerjs&version=1.5.4';
 
-const VER = 'v6';
+const VER = 'v8';
 const $ = id => document.getElementById(id);
 const dbgLines = [];
 function dlog(msg){
@@ -136,10 +137,14 @@ function setPill(id, text, cls){ const el = $(id); el.textContent = text; el.cla
 
 let CAM = '';
 let PW = localStorage.getItem('camPw') || '';
-// QRコード（…#pw=xxxx）から開いたらパスワードを保存して、URLからは消す
-const hashPw = new URLSearchParams(location.hash.slice(1)).get('pw');
-if (hashPw){ PW = hashPw; localStorage.setItem('camPw', PW); history.replaceState(null, '', location.pathname + location.search); }
-// カメラIDはパスワードから自動計算（PC側と同じ計算）
+let savedCam = localStorage.getItem('camId') || '';
+// QRコード（…#cam=…&pw=…）から開いたらID・パスワードを保存して、URLからは消す
+const _hp = new URLSearchParams(location.hash.slice(1));
+const hashPw = _hp.get('pw'), hashCam = _hp.get('cam');
+if (hashCam){ savedCam = hashCam; localStorage.setItem('camId', hashCam); }
+if (hashPw){ PW = hashPw; localStorage.setItem('camPw', PW); }
+if (hashPw || hashCam) history.replaceState(null, '', location.pathname + location.search);
+// 保存されたIDがあればそれを使い、無ければパスワードから計算（手入力時のフォールバック）
 const camIdFrom = async pw => 'gcam-' + (await sha256hex('gcam-id:' + pw)).slice(0, 16);
 
 // ---------- ログイン ----------
@@ -153,13 +158,17 @@ $('loginForm').onsubmit = e => {
   e.preventDefault();
   PW = $('pw').value.trim();
   if (!PW){ $('loginErr').textContent = 'パスワードを入れてください'; return; }
-  localStorage.setItem('camPw', PW);
+  // 手入力時はIDをパスワードから計算し直す
+  savedCam = ''; localStorage.removeItem('camId'); localStorage.setItem('camPw', PW);
   start();
 };
-$('logout').onclick = () => { localStorage.removeItem('camPw'); PW = ''; showLogin(); };
+$('logout').onclick = () => {
+  localStorage.removeItem('camPw'); localStorage.removeItem('camId');
+  PW = ''; savedCam = ''; showLogin();
+};
 
 async function start(){
-  CAM = await camIdFrom(PW);
+  CAM = savedCam || await camIdFrom(PW);
   dlog(`ページ ${VER} / カメラID: ${CAM}`);
   $('login').classList.add('hidden'); $('app').classList.remove('hidden');
   if (typeof RTCPeerConnection === 'undefined'){
@@ -338,6 +347,9 @@ function setupDc(ch){
       try { m = JSON.parse(a.join('')); } catch { return; }
     }
     if (m.t === 'status'){ data = m; render(); }
+    else if (m.t === 'quitResult'){
+      stopAll(); setPill('conn', '監視を終了しました', 'bad'); liveMsg('監視を終了しました。PCの画面は元に戻りました');
+    }
     else if (m.t === 'shutdownResult'){
       if (m.ok){ stopAll(); setPill('conn', 'PCをシャットダウンしました', 'bad'); liveMsg('PCをシャットダウンしました'); }
       else alert('PC側でシャットダウンが禁止されています');
@@ -371,6 +383,11 @@ $('nightBtn').onclick = () => {
   if (!data || !dc || dc.readyState !== 'open') return;
   dc.send(JSON.stringify({t: 'night', mode: NEXT[data.night] || 'auto'}));
 };
+$('quitBtn').onclick = () => {
+  if (!dc || dc.readyState !== 'open') return;
+  if (!confirm('監視を終了して、PCの画面を元に戻します。よろしいですか？')) return;
+  dc.send(JSON.stringify({t: 'quit'}));
+};
 $('shutdownBtn').onclick = () => {
   if (!dc || dc.readyState !== 'open') return;
   if (!confirm('PCをシャットダウンします。監視も止まります。よろしいですか？')) return;
@@ -379,7 +396,7 @@ $('shutdownBtn').onclick = () => {
 
 // ---------- 表示 ----------
 function render(){
-  for (const id of ['camState', 'motionState', 'nightBtn', 'shutdownBtn']) $(id).classList.remove('hidden');
+  for (const id of ['camState', 'motionState', 'nightBtn', 'quitBtn', 'shutdownBtn']) $(id).classList.remove('hidden');
   $('nightBtn').textContent = `暗所補正: ${NIGHT[data.night] || '自動'}`;
   setPill('camState', data.camera ? 'カメラ OK' : 'カメラが見つかりません', data.camera ? 'ok' : 'bad');
   const active = data.events.find(e => e.active);
