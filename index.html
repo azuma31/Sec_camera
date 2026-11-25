@@ -37,6 +37,8 @@ header h1{font-size:18px;margin:0 auto 0 0}
 .card h2{font-size:15px;margin:0}
 .row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .sub{color:var(--sub);font-size:13px}
+.recwrap{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:16/9;margin-bottom:10px}
+.recwrap img{width:100%;height:100%;object-fit:contain;display:block}
 canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015;cursor:pointer}
 .axis{display:flex;justify-content:space-between;color:var(--sub);font-size:11px;margin-top:4px}
 .list{display:grid;gap:8px;max-height:60vh;overflow:auto;margin-top:10px}
@@ -82,6 +84,18 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
     <div id="liveErr" class="overlay">接続中…</div>
   </section>
 
+  <section class="card full">
+    <div class="row"><h2>録画（直近30分）</h2><span id="recTime" class="sub"></span></div>
+    <div class="recwrap"><img id="recImg" alt=""><div id="recEmpty" class="empty">録画を準備中…</div></div>
+    <div class="vctl">
+      <button id="recPrev">◀</button>
+      <input id="recRange" type="range" min="0" max="1" value="1" step="1">
+      <button id="recNext">▶</button>
+      <button id="recPlay">再生</button>
+      <button id="recLiveBtn">最新</button>
+    </div>
+  </section>
+
   <section class="card">
     <div class="row"><h2>検知イベント</h2><span id="count" class="sub"></span></div>
     <div id="list" class="list"></div>
@@ -117,7 +131,7 @@ canvas{width:100%;height:70px;display:block;border-radius:8px;background:#0d1015
 // 接続の取り次ぎだけに使う（映像はここを通らない）
 const SIG = 'wss://0.peerjs.com/peerjs?key=peerjs&version=1.5.4';
 
-const VER = 'v8';
+const VER = 'v9';
 const $ = id => document.getElementById(id);
 const dbgLines = [];
 function dlog(msg){
@@ -354,8 +368,29 @@ function setupDc(ch){
       if (m.ok){ stopAll(); setPill('conn', 'PCをシャットダウンしました', 'bad'); liveMsg('PCをシャットダウンしました'); }
       else alert('PC側でシャットダウンが禁止されています');
     }
-    else if (m.t === 'shot' && pending[m.req]){ const f = pending[m.req]; delete pending[m.req]; f(m.b64); }
+    else if ((m.t === 'shot' || m.t === 'rec') && pending[m.req]){ const f = pending[m.req]; delete pending[m.req]; f(m.b64); }
   };
+}
+
+const recCache = new Map();
+function getRec(t){
+  t = Math.round(t);
+  const k = 'r' + t;
+  if (recCache.has(k)) return recCache.get(k);
+  if (!dc || dc.readyState !== 'open') return Promise.resolve(null);
+  const req = ++reqN;
+  const p = new Promise(res => {
+    pending[req] = b64 => {
+      if (!b64){ recCache.delete(k); return res(null); }
+      const bin = atob(b64), u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      res(URL.createObjectURL(new Blob([u], {type: 'image/jpeg'})));
+    };
+    setTimeout(() => { if (pending[req]){ delete pending[req]; recCache.delete(k); res(null); } }, 15000);
+  });
+  recCache.set(k, p);
+  dc.send(JSON.stringify({t: 'rec', time: t, req}));
+  return p;
 }
 
 function getShot(id, n){
@@ -376,6 +411,50 @@ function getShot(id, n){
   dc.send(JSON.stringify({t: 'shot', id, n, req}));
   return p;
 }
+
+// ---------- 録画（直近30分）の再生 ----------
+let recSel = null;   // 選択中の時刻（null＝最新に追従）
+let recTimer = null, recTok = 0;
+function recStop(){ clearInterval(recTimer); recTimer = null; $('recPlay').textContent = '再生'; }
+async function showRec(t, live){
+  const tok = ++recTok;
+  $('recTime').textContent = live ? '最新' : tstr(t);
+  const u = await getRec(t);
+  if (tok === recTok && u) $('recImg').src = u;
+}
+function renderRec(){
+  const has = data.recCount > 0;
+  $('recEmpty').classList.toggle('hidden', has);
+  if (!has){ recSel = null; return; }
+  const r = $('recRange');
+  r.min = Math.floor(data.recStart); r.max = Math.ceil(data.recEnd);
+  if (recSel === null){ r.value = r.max; showRec(data.recEnd, true); }  // 最新に追従
+  else {
+    recSel = Math.min(data.recEnd, Math.max(data.recStart, recSel));
+    r.value = recSel;
+  }
+  for (const [k, p] of recCache){  // 範囲外のキャッシュを捨てる
+    const t = +k.slice(1);
+    if (t < data.recStart - 5 || t > data.recEnd + 5){ recCache.delete(k); p.then(u => u && URL.revokeObjectURL(u)); }
+  }
+}
+$('recRange').oninput = e => { recStop(); recSel = +e.target.value; showRec(recSel); };
+$('recPrev').onclick = () => { if (!data) return; recStop(); recSel = Math.max(Math.floor(data.recStart), (recSel ?? data.recEnd) - 1); $('recRange').value = recSel; showRec(recSel); };
+$('recNext').onclick = () => { if (!data) return; recStop(); recSel = Math.min(Math.ceil(data.recEnd), (recSel ?? data.recEnd) + 1); $('recRange').value = recSel; showRec(recSel); };
+$('recLiveBtn').onclick = () => { recStop(); recSel = null; if (data) renderRec(); };
+$('recPlay').onclick = () => {
+  if (recTimer) return recStop();
+  if (!data || !data.recCount) return;
+  if (recSel === null) recSel = Math.floor(data.recStart);  // 頭から再生
+  $('recPlay').textContent = '停止';
+  showRec(recSel);
+  recTimer = setInterval(() => {
+    if (!data) return;
+    recSel += 1;
+    if (recSel >= data.recEnd){ recSel = Math.ceil(data.recEnd); $('recRange').value = recSel; showRec(recSel); return recStop(); }
+    $('recRange').value = recSel; showRec(recSel);
+  }, 300);
+};
 
 // ---------- 暗所補正・シャットダウン ----------
 const NIGHT = {auto: '自動', on: '強', off: '切'}, NEXT = {auto: 'on', on: 'off', off: 'auto'};
@@ -409,7 +488,7 @@ function render(){
   // 1時間より古い画像のキャッシュを捨てる
   const ids = new Set(data.events.map(e => String(e.id)));
   for (const [k, p] of shotCache) if (!ids.has(k.split('/')[0])){ shotCache.delete(k); p.then(u => u && URL.revokeObjectURL(u)); }
-  drawTimeline(); renderList(); refreshViewer();
+  drawTimeline(); renderList(); refreshViewer(); renderRec();
 }
 addEventListener('focus', () => document.title = '監視カメラ');
 document.addEventListener('touchstart', () => document.title = '監視カメラ', {passive: true});
